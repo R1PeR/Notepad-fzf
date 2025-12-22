@@ -5,6 +5,7 @@
 #include "text_buffer.h"
 
 #include <ctype.h>
+// #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -25,23 +26,34 @@
 #    define PATH_SEP '/'
 #endif
 
-#define WINDOW_WIDTH    1200
-#define WINDOW_HEIGHT   800
-#define FONT_SIZE       11
-#define FONT_SPACING    1.0f
-#define LINE_HEIGHT     FONT_SIZE
+#define WINDOW_WIDTH  1200
+#define WINDOW_HEIGHT 800
+#define FONT_SIZE     14
+#define FONT_SPACING  1.0f
+// #define LINE_HEIGHT     FONT_SIZE
 #define LEFT_MARGIN     60
 #define TOP_MARGIN      10
 #define STATUS_HEIGHT   25
 #define MAX_PATH        4096
 #define KEY_REPEAT_TIME 200  // milliseconds
 
+enum EditorMode
+{
+    MODE_NORMAL = 0,
+    MODE_FILE_SEARCH,
+    MODE_GREP_SEARCH,
+    MODE_DIRECTORY_SEARCH,
+    MODE_TERMINAL,
+};
 
 typedef struct
 {
-    // Window
+    // Window settings
     unsigned int windowWidth;
     unsigned int windowHeight;
+    unsigned int fontSize;
+    float        fontSpacing;
+    unsigned int lineHeight;
 
     TextBuffer* buffers[10];
     int         bufferCount;
@@ -52,8 +64,12 @@ typedef struct
     // Current directory
     char currentDir[512];
 
+    // Editor mode
+    unsigned short mode;
+    unsigned short previousMode;
+
     // File browser
-    bool   showFileBrowser;
+    // bool   showFileBrowser;
     bool   browserIsDirectoryMode;  // true for directory selection, false for file selection
     char   browserFilter[256];
     int    browserFilterCursor;
@@ -64,7 +80,7 @@ typedef struct
     int    browserScrollOffset;
 
     // Grep browser
-    bool   showGrepBrowser;
+    // bool   showGrepBrowser;
     char   grepPattern[256];
     int    grepPatternCursor;
     char** grepResults;
@@ -74,7 +90,7 @@ typedef struct
     int    grepScrollOffset;
 
     // Directory search
-    bool   showDirectoryDialog;
+    // bool   showDirectoryDialog;
     char   directoryPattern[256];
     int    directoryPatternCursor;
     char** directoryResults;
@@ -90,6 +106,7 @@ typedef struct
 
     Stopwatch    keyRepeatTimer;
     unsigned int lastKeyPressed;
+    bool         waitForNoInput;
 } EditorState;
 
 static EditorState editor = { 0 };
@@ -151,8 +168,8 @@ static void ScanFilesRecursive(const char* basePath, bool dirsOnly)
     // reverse items
     for (int i = 0; i < editor.browserItemCount / 2; i++)
     {
-        char* temp                             = editor.browserItems[i];
-        editor.browserItems[i]                 = editor.browserItems[editor.browserItemCount - i - 1];
+        char* temp                                           = editor.browserItems[i];
+        editor.browserItems[i]                               = editor.browserItems[editor.browserItemCount - i - 1];
         editor.browserItems[editor.browserItemCount - i - 1] = temp;
     }
 }
@@ -228,24 +245,25 @@ static void ExecuteRipgrep(const char* pattern)
     }
 
     _pclose(pipe);
-    //reverse results to show top matches first
+    // reverse results to show top matches first
     for (int i = 0; i < editor.grepResultCount / 2; i++)
     {
-        char* temp                             = editor.grepResults[i];
-        editor.grepResults[i]                  = editor.grepResults[editor.grepResultCount - i - 1];
+        char* temp                                         = editor.grepResults[i];
+        editor.grepResults[i]                              = editor.grepResults[editor.grepResultCount - i - 1];
         editor.grepResults[editor.grepResultCount - i - 1] = temp;
     }
 }
 
 static void InitEditor(void);
 static void UpdateEditor(void);
+static void ChangeMode(unsigned short newMode);
 static void DrawEditor(void);
 static void HandleInput(void);
 static void DrawTextBuffer(TextBuffer* buffer, int x, int y, int width, int height);
 static void DrawSelection(TextBuffer* buffer, int x, int y, int width, int height);
 static void DrawLineNumbers(TextBuffer* buffer, int x, int y, int width, int height);
+static void DrawStatusBar(TextBuffer* buffer, int x, int y, int width, int height);
 static void DrawWindows(void);
-static void DrawDirectoryBrowser(void);
 static void DrawFileBrowser(void);
 static void DrawGrepBrowser(void);
 static void DrawTerminal(void);
@@ -253,6 +271,7 @@ static void AddBuffer(TextBuffer* buffer);
 static void CloseBuffer(int index);
 static void NewBuffer(void);
 static void SaveCurrentBuffer(void);
+static void UpdateFont(void);
 
 int main(void)
 {
@@ -282,7 +301,7 @@ int main(void)
             DestroyTextBuffer(editor.buffers[i]);
         }
     }
-    free(editor.buffers);
+    // free(editor.buffers);
 
     for (int i = 0; i < editor.browserItemCount; i++)
     {
@@ -310,11 +329,14 @@ int main(void)
 
 static void InitEditor(void)
 {
-    editor.font = LoadFontEx("C:/Windows/Fonts/consola.ttf", FONT_SIZE, NULL, 0);
-    if (editor.font.texture.id == 0)
-    {
-        editor.font = GetFontDefault();
-    }
+    // editor.font = LoadFontEx("C:/Windows/Fonts/consola.ttf", FONT_SIZE, NULL, 0);
+    // if (editor.font.texture.id == 0)
+    // {
+    //     editor.font = GetFontDefault();
+    // }
+    editor.fontSize    = FONT_SIZE;
+    editor.fontSpacing = FONT_SPACING;
+    UpdateFont();
 
     // editor.bufferCapacity    = 10;
     // editor.buffers           = (TextBuffer**)malloc(sizeof(TextBuffer*) * editor.bufferCapacity);
@@ -327,19 +349,18 @@ static void InitEditor(void)
         strcpy(editor.currentDir, ".");
     }
 
-    editor.showFileBrowser  = false;
+    editor.mode = MODE_NORMAL;
+
     editor.browserItems     = NULL;
     editor.browserItemCount = 0;
     editor.browserCapacity  = 0;
 
-    editor.showGrepBrowser    = false;
     editor.grepPattern[0]     = '\0';
     editor.grepPatternCursor  = 0;
     editor.grepResults        = NULL;
     editor.grepResultCount    = 0;
     editor.grepResultCapacity = 0;
 
-    editor.showDirectoryDialog     = false;
     editor.directoryPattern[0]     = '\0';
     editor.directoryPatternCursor  = 0;
     editor.directoryResults        = NULL;
@@ -361,103 +382,47 @@ static void UpdateEditor(void)
     editor.windowHeight = GetScreenHeight();
 }
 
+static void ChangeMode(unsigned short newMode)
+{
+    editor.previousMode = editor.mode;
+    editor.mode         = newMode;
+    while (GetCharPressed() > 0)
+        ;  // Clear input buffer
+    Stopwatch_Stop(&editor.keyRepeatTimer);
+    editor.waitForNoInput = true;
+}
+
+static void UpdateFont(void)
+{
+    if (editor.font.texture.id != 0)
+    {
+        UnloadFont(editor.font);
+    }
+    editor.font = LoadFontEx("C:/Windows/Fonts/consola.ttf", editor.fontSize, NULL, 0);
+    if (editor.font.texture.id == 0)
+    {
+        editor.font = GetFontDefault();
+    }
+    editor.lineHeight = editor.font.baseSize;
+}
+
 static void DrawEditor(void)
 {
     // Draw windows
     DrawWindows();
 
-    // Draw search dialog if open (on top of everything)
-    // if (editor.showDirectoryDialog)
-    // {
-    //     DrawDirectoryBrowser();
-    // }
-
     // Draw file browser if open (on top of everything)
-    if (editor.showFileBrowser)
+    if (editor.mode == MODE_FILE_SEARCH || editor.mode == MODE_DIRECTORY_SEARCH)
     {
         DrawFileBrowser();
     }
 
     // Draw grep browser if open (on top of everything)
-    if (editor.showGrepBrowser)
+    if (editor.mode == MODE_GREP_SEARCH)
     {
         DrawGrepBrowser();
     }
 }
-
-// static void DrawDirectoryBrowser(void)
-// {
-//     // Draw panel
-//     Rectangle rect = DrawPanel(0, 0, editor.windowWidth, editor.windowHeight);
-//
-//     // Title and pattern input
-//     DrawTextEx(editor.font, "Ripgrep Search", (Vector2){ rect.x + 10, rect.y + 10 }, FONT_SIZE, FONT_SPACING, WHITE);
-//
-//     DrawTextEx(editor.font, "Pattern:", (Vector2){ rect.x + 10, rect.y + 35 }, FONT_SIZE, FONT_SPACING, GRAY);
-//     DrawTextEx(editor.font, editor.grepPattern, (Vector2){ rect.x + 100, rect.y + 35 }, FONT_SIZE, FONT_SPACING, WHITE);
-//
-//     // Blinking cursor for pattern input
-//     if ((int)(GetTime() * 2) % 2 == 0)
-//     {
-//         int cursorX = rect.x + 100 + MeasureTextEx(editor.font, editor.grepPattern, 16, 1).x;
-//         DrawRectangle(cursorX, rect.y + 35, 2, 16, WHITE);
-//     }
-//     // Current directory
-//     char dirLabel[600];
-//     snprintf(dirLabel, sizeof(dirLabel), "Dir: %s", editor.currentDir);
-//     DrawTextEx(editor.font, dirLabel, (Vector2){ rect.x + 10, rect.y + 60 }, FONT_SIZE, FONT_SPACING,
-//                (Color){ 120, 120, 120, 255 });
-//
-//     // Results list
-//     int visibleItems = rect.height / FONT_SIZE - 11;
-//     int itemHeight   = FONT_SIZE;
-//     int listY        = rect.y + 90;
-//
-//     for (int i = editor.grepScrollOffset; i < editor.grepResultCount && i < editor.grepScrollOffset + visibleItems; i++)
-//     {
-//         int idx = i - editor.grepScrollOffset;
-//
-//         // Highlight selected
-//         Color bgColor = (i == editor.grepSelected) ? (Color){ 60, 120, 200, 255 } : (Color){ 45, 45, 45, 0 };
-//         if (bgColor.a > 0)
-//         {
-//             DrawRectangle(rect.x + 10, listY + idx * itemHeight, rect.width - 20, itemHeight - 2, bgColor);
-//         }
-//
-//         // Parse and display result (file:line:col:text)
-//         const char* result = editor.grepResults[i];
-//
-//         // Find first colon (end of filename)
-//         const char* firstColon = strchr(result, ':');
-//         if (firstColon)
-//         {
-//             // Display filename in cyan
-//             int  filenameLen = firstColon - result;
-//             char filename[512];
-//             strncpy(filename, result, filenameLen);
-//             filename[filenameLen] = '\0';
-//
-//             DrawTextEx(editor.font, filename, (Vector2){ rect.x + 15, listY + idx * itemHeight + 2 }, FONT_SIZE,
-//                        FONT_SPACING, (Color){ 100, 200, 255, 255 });
-//
-//             // Display rest in gray
-//             int filenameWidth = MeasureTextEx(editor.font, filename, 14, 1).x;
-//             DrawTextEx(editor.font, firstColon, (Vector2){ rect.x + 15 + filenameWidth, listY + idx * itemHeight + 2 },
-//                        FONT_SIZE, FONT_SPACING, (Color){ 180, 180, 180, 255 });
-//         }
-//         else
-//         {
-//             DrawTextEx(editor.font, result, (Vector2){ rect.x + 15, listY + idx * itemHeight + 2 }, FONT_SIZE,
-//                        FONT_SPACING, WHITE);
-//         }
-//     }
-//
-//     // Instructions
-//     char infoText[256];
-//     snprintf(infoText, sizeof(infoText), "Found: %d | ESC: cancel | Enter: open", editor.grepResultCount);
-//     DrawTextEx(editor.font, infoText, (Vector2){ rect.x + 10, rect.y + rect.height - 25 }, FONT_SIZE, FONT_SPACING,
-//                GRAY);
-// }
 
 static void DrawFileBrowser(void)
 {
@@ -470,25 +435,26 @@ static void DrawFileBrowser(void)
 
     // Title and filter
     const char* title = editor.browserIsDirectoryMode ? "Change Directory" : "Open File";
-    DrawTextEx(editor.font, title, (Vector2){ rect.x + 10, rect.y + 10 }, FONT_SIZE, FONT_SPACING, WHITE);
+    DrawTextEx(editor.font, title, (Vector2){ rect.x + 10, rect.y + 10 }, editor.fontSize, editor.fontSpacing, WHITE);
 
-    DrawTextEx(editor.font, "Filter:", (Vector2){ rect.x + 10, rect.y + 35 }, FONT_SIZE, FONT_SPACING, GRAY);
+    DrawTextEx(editor.font, "Filter:", (Vector2){ rect.x + 10, rect.y + 35 }, editor.fontSize, editor.fontSpacing,
+               GRAY);
 
-    float textWidth = MeasureTextEx(editor.font, "Filter:", FONT_SIZE, FONT_SPACING).x;
+    float textWidth = MeasureTextEx(editor.font, "Filter:", editor.fontSize, editor.fontSpacing).x;
 
-    DrawTextEx(editor.font, editor.browserFilter, (Vector2){ rect.x + 10 + textWidth, rect.y + 35 }, FONT_SIZE,
-               FONT_SPACING, WHITE);
+    DrawTextEx(editor.font, editor.browserFilter, (Vector2){ rect.x + 10 + textWidth, rect.y + 35 }, editor.fontSize,
+               editor.fontSpacing, WHITE);
 
     // Current directory
     char dirLabel[600];
     snprintf(dirLabel, sizeof(dirLabel), "Dir: %s", editor.currentDir);
 
-    DrawTextEx(editor.font, dirLabel, (Vector2){ rect.x + 10, rect.y + 60 }, FONT_SIZE, FONT_SPACING,
+    DrawTextEx(editor.font, dirLabel, (Vector2){ rect.x + 10, rect.y + 60 }, editor.fontSize, editor.fontSpacing,
                (Color){ 120, 120, 120, 255 });
 
     // Filter and display matching items
-    int visibleItems = rect.height / FONT_SIZE - 11;
-    int itemHeight   = FONT_SIZE;
+    int visibleItems = rect.height / editor.fontSize - 11;
+    int itemHeight   = editor.fontSize;
     int listY        = rect.y + 90;
     int displayCount = 0;
 
@@ -546,13 +512,13 @@ static void DrawFileBrowser(void)
                 if (displayPath[0] == '\\')
                     displayPath++;
             }
-            while (MeasureTextEx(editor.font, displayPath, FONT_SIZE, FONT_SPACING).x > rect.width - 40)
+            while (MeasureTextEx(editor.font, displayPath, editor.fontSize, editor.fontSpacing).x > rect.width - 40)
             {
                 displayPath++;
             }
 
-            DrawTextEx(editor.font, displayPath, (Vector2){ rect.x + 15, listY + idx * itemHeight + 2 }, FONT_SIZE,
-                       FONT_SPACING, WHITE);
+            DrawTextEx(editor.font, displayPath, (Vector2){ rect.x + 15, listY + idx * itemHeight + 2 },
+                       editor.fontSize, editor.fontSpacing, WHITE);
         }
 
         displayCount++;
@@ -561,8 +527,8 @@ static void DrawFileBrowser(void)
     // Instructions
     char infoText[256];
     snprintf(infoText, sizeof(infoText), "Found: %d | ESC: cancel | Enter: select", displayCount);
-    DrawTextEx(editor.font, infoText, (Vector2){ rect.x + 10, rect.y + rect.height - 25 }, FONT_SIZE, FONT_SPACING,
-               GRAY);
+    DrawTextEx(editor.font, infoText, (Vector2){ rect.x + 10, rect.y + rect.height - 25 }, editor.fontSize,
+               editor.fontSpacing, GRAY);
 }
 
 static void DrawGrepBrowser(void)
@@ -574,14 +540,16 @@ static void DrawGrepBrowser(void)
     DrawRectangleLines(rect.x, rect.y, rect.width, rect.height, (Color){ 100, 100, 100, 255 });
 
     // Title and pattern input
-    DrawTextEx(editor.font, "Ripgrep Search", (Vector2){ rect.x + 10, rect.y + 10 }, FONT_SIZE, FONT_SPACING, WHITE);
+    DrawTextEx(editor.font, "Ripgrep Search", (Vector2){ rect.x + 10, rect.y + 10 }, editor.fontSize,
+               editor.fontSpacing, WHITE);
 
-    DrawTextEx(editor.font, "Pattern:", (Vector2){ rect.x + 10, rect.y + 35 }, FONT_SIZE, FONT_SPACING, GRAY);
+    DrawTextEx(editor.font, "Pattern:", (Vector2){ rect.x + 10, rect.y + 35 }, editor.fontSize, editor.fontSpacing,
+               GRAY);
 
-    float textWidth = MeasureTextEx(editor.font, "Pattern:", FONT_SIZE, FONT_SPACING).x;
+    float textWidth = MeasureTextEx(editor.font, "Pattern:", editor.fontSize, editor.fontSpacing).x;
 
-    DrawTextEx(editor.font, editor.grepPattern, (Vector2){ rect.x + 10 + textWidth, rect.y + 35 }, FONT_SIZE,
-               FONT_SPACING, WHITE);
+    DrawTextEx(editor.font, editor.grepPattern, (Vector2){ rect.x + 10 + textWidth, rect.y + 35 }, editor.fontSize,
+               editor.fontSpacing, WHITE);
 
     // Blinking cursor for pattern input
     // if ((int)(GetTime() * 2) % 2 == 0)
@@ -593,12 +561,12 @@ static void DrawGrepBrowser(void)
     // Current directory
     char dirLabel[600];
     snprintf(dirLabel, sizeof(dirLabel), "Dir: %s", editor.currentDir);
-    DrawTextEx(editor.font, dirLabel, (Vector2){ rect.x + 10, rect.y + 60 }, FONT_SIZE, FONT_SPACING,
+    DrawTextEx(editor.font, dirLabel, (Vector2){ rect.x + 10, rect.y + 60 }, editor.fontSize, editor.fontSpacing,
                (Color){ 120, 120, 120, 255 });
 
     // Results list
-    int visibleItems = rect.height / FONT_SIZE - 11;
-    int itemHeight   = FONT_SIZE;
+    int visibleItems = rect.height / editor.fontSize - 11;
+    int itemHeight   = editor.fontSize;
     int listY        = rect.y + 90;
 
     for (int i = editor.grepScrollOffset; i < editor.grepResultCount && i < editor.grepScrollOffset + visibleItems; i++)
@@ -614,7 +582,7 @@ static void DrawGrepBrowser(void)
 
         // Parse and display result (file:line:col:text)
         const char* result = editor.grepResults[i];
-        while (MeasureTextEx(editor.font, result, FONT_SIZE, FONT_SPACING).x > rect.width - 40)
+        while (MeasureTextEx(editor.font, result, editor.fontSize, editor.fontSpacing).x > rect.width - 40)
         {
             result++;
         }
@@ -629,32 +597,32 @@ static void DrawGrepBrowser(void)
             strncpy(filename, result, filenameLen);
             filename[filenameLen] = '\0';
 
-            DrawTextEx(editor.font, filename, (Vector2){ rect.x + 15, listY + idx * itemHeight + 2 }, FONT_SIZE,
-                       FONT_SPACING, (Color){ 100, 200, 255, 255 });
+            DrawTextEx(editor.font, filename, (Vector2){ rect.x + 15, listY + idx * itemHeight + 2 }, editor.fontSize,
+                       editor.fontSpacing, (Color){ 100, 200, 255, 255 });
 
 
             // Display rest in gray
-            int filenameWidth = MeasureTextEx(editor.font, filename, FONT_SIZE, FONT_SPACING).x;
+            int filenameWidth = MeasureTextEx(editor.font, filename, editor.fontSize, editor.fontSpacing).x;
             DrawTextEx(editor.font, firstColon, (Vector2){ rect.x + 15 + filenameWidth, listY + idx * itemHeight + 2 },
-                       FONT_SIZE, FONT_SPACING, (Color){ 180, 180, 180, 255 });
+                       editor.fontSize, editor.fontSpacing, (Color){ 180, 180, 180, 255 });
         }
         else
         {
 
-            while (MeasureTextEx(editor.font, result, FONT_SIZE, FONT_SPACING).x > rect.width - 40)
+            while (MeasureTextEx(editor.font, result, editor.fontSize, editor.fontSpacing).x > rect.width - 40)
             {
                 result++;
             }
-            DrawTextEx(editor.font, result, (Vector2){ rect.x + 15, listY + idx * itemHeight + 2 }, FONT_SIZE,
-                       FONT_SPACING, WHITE);
+            DrawTextEx(editor.font, result, (Vector2){ rect.x + 15, listY + idx * itemHeight + 2 }, editor.fontSize,
+                       editor.fontSpacing, WHITE);
         }
     }
 
     // Instructions
     char infoText[256];
     snprintf(infoText, sizeof(infoText), "Found: %d | ESC: cancel | Enter: open", editor.grepResultCount);
-    DrawTextEx(editor.font, infoText, (Vector2){ rect.x + 10, rect.y + rect.height - 25 }, FONT_SIZE, FONT_SPACING,
-               GRAY);
+    DrawTextEx(editor.font, infoText, (Vector2){ rect.x + 10, rect.y + rect.height - 25 }, editor.fontSize,
+               editor.fontSpacing, GRAY);
 }
 
 static void DrawTerminal(void)
@@ -667,8 +635,17 @@ static void HandleInput(void)
                              editor.buffers[editor.activeBufferIndex] :
                              NULL;
 
+    if (editor.waitForNoInput)
+    {
+        if (!IsKeyDown(editor.lastKeyPressed))
+        {
+            editor.waitForNoInput = false;
+        }
+        return;
+    }
+
     // Grep browser input
-    if (editor.showGrepBrowser)
+    if (editor.mode == MODE_GREP_SEARCH)
     {
         // Type pattern and execute on every keystroke
         int  key            = GetCharPressed();
@@ -686,6 +663,7 @@ static void HandleInput(void)
 
         if (IsKeyDown(KEY_BACKSPACE) && editor.grepPatternCursor > 0)
         {
+            editor.lastKeyPressed                          = KEY_BACKSPACE;
             editor.grepPattern[--editor.grepPatternCursor] = '\0';
             patternChanged                                 = true;
         }
@@ -710,6 +688,7 @@ static void HandleInput(void)
         // Navigate results with IsKeyDown for continuous movement
         if ((IsKeyDown(KEY_DOWN)) && editor.grepResultCount > 0)
         {
+            editor.lastKeyPressed = KEY_DOWN;
             editor.grepSelected++;
             if (editor.grepSelected >= editor.grepResultCount)
                 editor.grepSelected = editor.grepResultCount - 1;
@@ -718,6 +697,7 @@ static void HandleInput(void)
         }
         if ((IsKeyDown(KEY_UP)) && editor.grepResultCount > 0)
         {
+            editor.lastKeyPressed = KEY_UP;
             editor.grepSelected--;
             if (editor.grepSelected < 0)
                 editor.grepSelected = 0;
@@ -727,6 +707,7 @@ static void HandleInput(void)
 
         if (IsKeyPressed(KEY_ENTER) && editor.grepResultCount > 0)
         {
+            editor.lastKeyPressed = KEY_ENTER;
             // Parse result: filename:line:column:text
             const char* result        = editor.grepResults[editor.grepSelected];
             char        filepath[512] = { 0 };
@@ -796,20 +777,20 @@ static void HandleInput(void)
                         buffer->cursorPos = pos;
                     }
                 }
-
-                editor.showGrepBrowser = false;
+                ChangeMode(MODE_NORMAL);
             }
         }
 
         if (IsKeyPressed(KEY_ESCAPE))
         {
-            editor.showGrepBrowser = false;
+            editor.lastKeyPressed = KEY_ESCAPE;
+            ChangeMode(MODE_NORMAL);
         }
         return;
     }
 
     // File browser input
-    if (editor.showFileBrowser)
+    if (editor.mode == MODE_FILE_SEARCH)
     {
         // Type to filter
         int key = GetCharPressed();
@@ -827,6 +808,7 @@ static void HandleInput(void)
 
         if (IsKeyPressed(KEY_BACKSPACE) && editor.browserFilterCursor > 0)
         {
+            editor.lastKeyPressed                              = KEY_BACKSPACE;
             editor.browserFilter[--editor.browserFilterCursor] = '\0';
             editor.browserSelected                             = 0;
             editor.browserScrollOffset                         = 0;
@@ -860,6 +842,7 @@ static void HandleInput(void)
 
         if (IsKeyPressed(KEY_DOWN))
         {
+            editor.lastKeyPressed = KEY_DOWN;
             editor.browserSelected++;
             if (editor.browserSelected >= filteredCount)
                 editor.browserSelected = filteredCount - 1;
@@ -868,6 +851,7 @@ static void HandleInput(void)
         }
         if (IsKeyPressed(KEY_UP))
         {
+            editor.lastKeyPressed = KEY_UP;
             editor.browserSelected--;
             if (editor.browserSelected < 0)
                 editor.browserSelected = 0;
@@ -877,6 +861,7 @@ static void HandleInput(void)
 
         if (IsKeyPressed(KEY_ENTER) && filteredCount > 0)
         {
+            editor.lastKeyPressed = KEY_ENTER;
             // Find the selected filtered item
             int currentIdx = 0;
             for (int i = 0; i < editor.browserItemCount; i++)
@@ -944,7 +929,7 @@ static void HandleInput(void)
                             }
                         }
                     }
-                    editor.showFileBrowser = false;
+                    ChangeMode(MODE_NORMAL);
                     break;
                 }
                 currentIdx++;
@@ -953,16 +938,13 @@ static void HandleInput(void)
 
         if (IsKeyPressed(KEY_ESCAPE))
         {
-            editor.showFileBrowser = false;
+            ChangeMode(MODE_NORMAL);
         }
         return;
     }
 
-    if (!buffer)
-        return;
-
     // directory dialog input (continued in next part...)
-    if (editor.showDirectoryDialog)
+    if (editor.mode == MODE_DIRECTORY_SEARCH)
     {
         int key = GetCharPressed();
         while (key > 0)
@@ -977,11 +959,13 @@ static void HandleInput(void)
 
         if (IsKeyPressed(KEY_BACKSPACE) && editor.directoryPatternCursor > 0)
         {
+            editor.lastKeyPressed                                    = KEY_BACKSPACE;
             editor.directoryPattern[--editor.directoryPatternCursor] = '\0';
         }
 
         if (IsKeyPressed(KEY_ENTER) && editor.directoryPattern[0] != '\0')
         {
+            editor.lastKeyPressed = KEY_ENTER;
             size_t foundPos;
             if (SearchForward(buffer, editor.directoryPattern, &foundPos))
             {
@@ -990,13 +974,19 @@ static void HandleInput(void)
                 buffer->selectionStart = foundPos;
                 buffer->selectionEnd   = foundPos + strlen(editor.directoryPattern);
             }
-            editor.showDirectoryDialog = false;
+            ChangeMode(MODE_NORMAL);
         }
 
         if (IsKeyPressed(KEY_ESCAPE))
         {
-            editor.showDirectoryDialog = false;
+            editor.lastKeyPressed = KEY_ESCAPE;
+            ChangeMode(MODE_NORMAL);
         }
+        return;
+    }
+
+    if (!buffer)
+    {
         return;
     }
 
@@ -1016,7 +1006,7 @@ static void HandleInput(void)
     if (ctrlPressed && IsKeyPressed(KEY_O))
     {
         InitFileBrowser(false);  // false = files
-        editor.showFileBrowser = true;
+        ChangeMode(MODE_FILE_SEARCH);
         return;
     }
 
@@ -1024,14 +1014,14 @@ static void HandleInput(void)
     if (ctrlPressed && IsKeyPressed(KEY_D))
     {
         InitFileBrowser(true);  // true = directories only
-        editor.showFileBrowser = true;
+        ChangeMode(MODE_DIRECTORY_SEARCH);
         return;
     }
 
     // Ctrl+G - Ripgrep search
     if (ctrlPressed && IsKeyPressed(KEY_G))
     {
-        editor.showGrepBrowser   = true;
+        ChangeMode(MODE_GREP_SEARCH);
         editor.grepPattern[0]    = '\0';
         editor.grepPatternCursor = 0;
         return;
@@ -1060,15 +1050,6 @@ static void HandleInput(void)
         }
         return;
     }
-
-    // Ctrl+F - Search
-    // if (ctrlPressed && IsKeyPressed(KEY_F))
-    // {
-    //     editor.showDirectoryDialog    = true;
-    //     editor.directoryPattern[0]    = '\0';
-    //     editor.directoryPatternCursor = 0;
-    //     return;
-    // }
 
     // Ctrl+C/X/V - Copy/Cut/Paste
     if (ctrlPressed && IsKeyPressed(KEY_C))
@@ -1354,6 +1335,32 @@ static void HandleInput(void)
         }
     }
 
+    if (IsKeyPressed(KEY_EQUAL))
+    {
+        if (ctrlPressed)
+        {
+            editor.fontSize += 2;
+            if (editor.fontSize > 48)
+            {
+                editor.fontSize = 48;
+            }
+            UpdateFont();
+        }
+    }
+
+    if (IsKeyPressed(KEY_MINUS))
+    {
+        if (ctrlPressed)
+        {
+            editor.fontSize -= 2;
+            if (editor.fontSize < 10)
+            {
+                editor.fontSize = 10;
+            }
+        }
+        UpdateFont();
+    }
+
     // Regular characters
     int key = GetCharPressed();
     while (key > 0)
@@ -1364,27 +1371,10 @@ static void HandleInput(void)
         }
         key = GetCharPressed();
     }
-    // for(int i = 32; i < 127; i++)
-    // {
-    //     if (IsKeyDown(i))
-    //     {
-    //         LOG_INF("Key %d is down", i);
-    //         if (editor.lastKeyPressed == i && Stopwatch_IsRunning(&editor.keyRepeatTimer))
-    //         {
-    //             continue;
-    //         }
-    //         InsertChar(buffer, (char)i);
-    //         if (IsKeyPressed(i))
-    //         {
-    //             editor.lastKeyPressed = KEY_TAB;
-    //             Stopwatch_Start(&editor.keyRepeatTimer, KEY_REPEAT_TIME);
-    //         }
-    //     }
-    // }
 
     // Auto-scroll
     size_t line         = GetLineFromPos(buffer, buffer->cursorPos);
-    int    visibleLines = (editor.windowHeight - STATUS_HEIGHT) / LINE_HEIGHT;
+    int    visibleLines = (editor.windowHeight - STATUS_HEIGHT) / editor.lineHeight;
     if ((int)line < buffer->scrollY)
     {
         buffer->scrollY = line;
@@ -1398,68 +1388,127 @@ static void HandleInput(void)
 static void DrawTextBuffer(TextBuffer* buffer, int x, int y, int width, int height)
 {
     if (!buffer || !buffer->text)
+    {
         return;
+    }
 
-    int    drawY = y + TOP_MARGIN - (buffer->scrollY * LINE_HEIGHT);
-    size_t pos   = 0;
-    char   lineBuffer[1024];
-    int    lineBufferLen = 0;
-    char   lineUntilCursor[1024];
-    bool   cursorLine = false;
+    int          drawY = y + TOP_MARGIN - (buffer->scrollY * editor.lineHeight);
+    size_t       pos   = 0;
+    char         lineBuffer[1024];
+    int          lineBufferLen = 0;
+    bool         cursorLine            = false;
+    bool         selectionStartLine    = false;
+    bool         selectionEndLine      = false;
+    unsigned int cursorLinePos         = 0;
+    unsigned int selectionLineStartPos = 0;
+    unsigned int selectionLineEndPos   = 0;
+
+    unsigned int selectionStart, selectionEnd;
+    cursorLinePos = 0;
+    selectionStart = 0;
+    selectionEnd = 0;
+
+    lineBuffer[0] = '\0';
+    if(buffer->hasSelection)
+    {
+        selectionStart = (buffer->selectionStart < buffer->selectionEnd) ? buffer->selectionStart : buffer->selectionEnd;
+        selectionEnd   = (buffer->selectionStart > buffer->selectionEnd) ? buffer->selectionStart : buffer->selectionEnd;
+    }
 
     while (pos <= buffer->length)
     {
         char c = (pos < buffer->length) ? buffer->text[pos] : '\0';
-        if(c == '\r')
+        if (c == '\r')
         {
             pos++;
-            continue; // skip carriage returns
+            continue;  // skip carriage returns
         }
         if (pos == buffer->cursorPos)
         {
-            memcpy(lineUntilCursor, lineBuffer, lineBufferLen);
-            lineUntilCursor[lineBufferLen] = '\0';
-            cursorLine                     = true;
+            if (lineBufferLen > 0)
+            {
+                cursorLinePos = MeasureTextEx(editor.font, lineBuffer, editor.fontSize, editor.fontSpacing).x;
+            }
+            else
+            {
+                cursorLinePos = 0;
+            }
+            cursorLine = true;
+        }
+        if (pos == selectionStart && buffer->hasSelection)
+        {
+            selectionLineStartPos = MeasureTextEx(editor.font, lineBuffer, editor.fontSize, editor.fontSpacing).x;
+            selectionStartLine    = true;
+        }
+        if (pos == selectionEnd && buffer->hasSelection)
+        {
+            selectionLineEndPos = MeasureTextEx(editor.font, lineBuffer, editor.fontSize, editor.fontSpacing).x;
+            selectionEndLine  = true;
         }
         if (c == '\n' || c == '\0')
         {
             lineBuffer[lineBufferLen] = '\0';
-
             if (drawY >= y && drawY < y + height)
             {
-                DrawTextEx(editor.font, lineBuffer, (Vector2){ LEFT_MARGIN - buffer->scrollX, drawY }, FONT_SIZE,
-                           FONT_SPACING, (Color){ 220, 220, 220, 255 });
+                // LOG_INF("%s", lineBuffer);
+                DrawTextEx(editor.font, lineBuffer, (Vector2){ LEFT_MARGIN - buffer->scrollX, drawY }, editor.fontSize,
+                           editor.fontSpacing, (Color){ 220, 220, 220, 255 });
                 if (cursorLine)
                 {
-                    float lineWidth = MeasureTextEx(editor.font, lineUntilCursor, FONT_SIZE, FONT_SPACING).x;
-                    DrawRectangle(LEFT_MARGIN - buffer->scrollX + lineWidth, drawY, 2, LINE_HEIGHT - 2,
+                    DrawRectangle(LEFT_MARGIN - buffer->scrollX + cursorLinePos, drawY, 2, editor.lineHeight - 2,
                                   (Color){ 200, 200, 200, 255 });
                     cursorLine = false;
                 }
+                if (selectionStartLine || selectionEndLine)
+                {
+                    unsigned int selStartX = selectionStartLine ? selectionLineStartPos : 0;
+                    unsigned int selEndX =
+                        selectionEndLine ?
+                            selectionLineEndPos :
+                            MeasureTextEx(editor.font, lineBuffer, editor.fontSize, editor.fontSpacing).x;
+                    DrawRectangle(LEFT_MARGIN - buffer->scrollX + selStartX, drawY, selEndX - selStartX,
+                                  editor.lineHeight, (Color){ 0, 120, 215, 100 });
+                    selectionStartLine = false;
+                    selectionEndLine   = false;
+                }
+                else if (pos > selectionStart && pos < selectionEnd && buffer->hasSelection)
+                {
+                    unsigned int selStartX = 0;
+                    unsigned int selEndX =
+                        MeasureTextEx(editor.font, lineBuffer, editor.fontSize, editor.fontSpacing).x;
+                    DrawRectangle(LEFT_MARGIN - buffer->scrollX + selStartX, drawY, selEndX - selStartX, editor.lineHeight,
+                                  (Color){ 0, 120, 215, 100 });
+                }
             }
 
-            drawY += LINE_HEIGHT;
+            drawY += editor.lineHeight;
             lineBufferLen = 0;
 
             if (drawY > y + height)
+            {
                 break;
+            }
         }
         else
         {
             if (lineBufferLen < 1023)
             {
                 lineBuffer[lineBufferLen++] = c;
+                lineBuffer[lineBufferLen]   = '\0';
             }
         }
 
         if (c == '\0')
+        {
             break;
+        }
         pos++;
     }
 }
 
 static void DrawSelection(TextBuffer* buffer, int x, int y, int width, int height)
 {
+    return;
     if (!buffer || !buffer->hasSelection)
         return;
 
@@ -1491,9 +1540,9 @@ static void DrawSelection(TextBuffer* buffer, int x, int y, int width, int heigh
 
             int x1   = LEFT_MARGIN + colStart * 10 - buffer->scrollX;
             int x2   = LEFT_MARGIN + colEnd * 10 - buffer->scrollX;
-            int selY = y + TOP_MARGIN + (line - buffer->scrollY) * LINE_HEIGHT;
+            int selY = y + TOP_MARGIN + (line - buffer->scrollY) * editor.lineHeight;
 
-            DrawRectangle(x1, selY, x2 - x1, LINE_HEIGHT - 2, (Color){ 0, 120, 215, 100 });
+            DrawRectangle(x1, selY, x2 - x1, editor.lineHeight, (Color){ 0, 120, 215, 100 });
         }
     }
 }
@@ -1506,17 +1555,18 @@ static void DrawLineNumbers(TextBuffer* buffer, int x, int y, int width, int hei
     DrawRectangle(x, y, LEFT_MARGIN - 5, height, (Color){ 40, 40, 40, 255 });
 
     int lineCount = GetLineCount(buffer);
-    int drawY     = y + TOP_MARGIN - (buffer->scrollY * LINE_HEIGHT);
+    int drawY     = y + TOP_MARGIN - (buffer->scrollY * editor.lineHeight);
 
     for (int i = 0; i < lineCount && drawY < y + height; i++)
     {
-        if (drawY + LINE_HEIGHT >= y)
+        if (drawY + editor.lineHeight >= y)
         {
             char lineNumStr[10];
             snprintf(lineNumStr, sizeof(lineNumStr), "%d", i + 1);
-            DrawTextEx(editor.font, lineNumStr, (Vector2){ 10, drawY }, FONT_SIZE, 1, (Color){ 150, 150, 150, 255 });
+            DrawTextEx(editor.font, lineNumStr, (Vector2){ 10, drawY }, editor.fontSize, 1,
+                       (Color){ 150, 150, 150, 255 });
         }
-        drawY += LINE_HEIGHT;
+        drawY += editor.lineHeight;
     }
 }
 
@@ -1531,12 +1581,12 @@ static void DrawWindows(void)
             int viewX = 0;
             int viewY = 0;
             int viewW = editor.windowWidth;
-            int viewH = editor.windowHeight - STATUS_HEIGHT;
+            int viewH = editor.windowHeight;
 
             DrawLineNumbers(buffer, viewX, viewY, viewW, viewH);
             DrawSelection(buffer, viewX, viewY, viewW, viewH);
             DrawTextBuffer(buffer, viewX, viewY, viewW, viewH);
-            // DrawCursor(buffer, viewX, viewY, viewW, viewH);
+            DrawStatusBar(buffer, viewX, viewY, viewW, viewH);
         }
     }
 }
@@ -1616,26 +1666,27 @@ static void NewBuffer(void)
     }
 }
 
-// static void DrawStatusBar(void)
-// {
-//     int y = editor.windowHeight - STATUS_HEIGHT;
-//     DrawRectangle(0, y, editor.windowWidth, STATUS_HEIGHT, (Color){ 40, 40, 40, 255 });
-//
-//     if (editor.activeBufferIndex >= 0 && editor.activeBufferIndex < editor.bufferCount)
-//     {
-//         TextBuffer* buffer = editor.buffers[editor.activeBufferIndex];
-//         if (buffer)
-//         {
-//             size_t line  = GetLineFromPos(buffer, buffer->cursorPos) + 1;
-//             size_t col   = GetColumnFromPos(buffer, buffer->cursorPos) + 1;
-//             int    lines = GetLineCount(buffer);
-//
-//             char statusText[256];
-//             snprintf(statusText, sizeof(statusText), " Line %zu, Col %zu | %d lines | %s | Dir: %s", line, col,
-//             lines,
-//                      buffer->filePath[0] ? buffer->filePath : "Untitled", editor.currentDir);
-//
-//             DrawTextEx(editor.font, statusText, (Vector2){ 10, y + 4 }, 14, 1, WHITE);
-//         }
-//     }
-// }
+static void DrawStatusBar(TextBuffer* buffer, int x, int y, int width, int height)
+{
+    int statusPosY = height - STATUS_HEIGHT;
+    DrawRectangle(x, y + statusPosY, width, STATUS_HEIGHT, (Color){ 40, 40, 40, 255 });
+
+    if (editor.activeBufferIndex >= 0 && editor.activeBufferIndex < editor.bufferCount)
+    {
+        TextBuffer* buffer = editor.buffers[editor.activeBufferIndex];
+        if (buffer)
+        {
+            size_t line  = GetLineFromPos(buffer, buffer->cursorPos) + 1;
+            size_t col   = GetColumnFromPos(buffer, buffer->cursorPos) + 1;
+            int    lines = GetLineCount(buffer);
+
+            char statusText[256];
+            snprintf(statusText, sizeof(statusText), " Line %zu, Col %zu | %d lines | %s | Dir: %s", line, col, lines,
+                     buffer->filePath[0] ? buffer->filePath : "Untitled", editor.currentDir);
+
+            char* statusTextPtr = statusText;
+
+            DrawTextEx(editor.font, statusTextPtr, (Vector2){ 10, statusPosY + 4 }, 14, 1, WHITE);
+        }
+    }
+}
